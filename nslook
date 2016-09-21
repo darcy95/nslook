@@ -1,0 +1,518 @@
+#!/usr/bin/perl -w
+
+# -----------------------------------------------------------
+# -- 			4th Work Sheet
+# -----------------------------------------------------------
+
+
+# -----------------------------------------------------------
+# -- Just small decorations
+# -----------------------------------------------------------
+use strict;
+use warnings;
+use M_Ansi;
+use M_Bin;
+use IO::Socket::INET;
+use constant NAME_SERVER => "193.0.14.129";
+
+# -----------------------------------------------------------
+# -- These six parameters are parsed from header and will
+# -- be used for other sections of packet too.
+# -----------------------------------------------------------
+my ($recv_id, $recv_sixteen_bits, $recv_qdcount, $recv_ancount, $recv_nscount, $recv_arcount);
+
+# -----------------------------------------------------------
+# -- Defined to show string or numeric information
+# -----------------------------------------------------------
+my %qtype_as_number = 
+("A"=>1,"NS"=>2,"MD"=>3,"MF"=>4,"CNAME"=>5,"SOA"=>6,"MB"=>7,"MG"=>8,"MR"=>9,"NULL"=>10,"WKS"=>11,
+"PTR"=>12,"HINFO"=>13,"MINFO"=>14,"MX"=>15,"TXT"=>16,"AFSDB"=>18,"AAAA"=>"28","AXFR"=>252,"MAILB"=>253,"MAILA"=>254,"ANY"=>255);
+
+my %qtype_as_string = ("1"=>"A","2"=>"NS","3"=>"MD","4"=>"MF","5"=>"CNAME","6"=>"SOA","7"=>"MB","8"=>"MG",
+"9"=>"MR","10"=>"NULL","11"=>"WKS","12"=>"PTR","13"=>"HINFO","14"=>"MINFO","15"=>"MX","16"=>"TXT","18"=>"AFSDB","28"=>"AAAA",
+"252"=>"AXFR","253"=>"MAILB","254"=>"MAILA","255"=>"ANY");
+
+my %qclass_as_number = ("IN"=>1,"CS"=>2,"CH"=>3,"HS"=>4,"ANY"=>255);
+my %qclass_as_string = ("1"=>"IN","2"=>"CS","3"=>"CH","4"=>"HS","255"=>"ANY");
+
+# -----------------------------------------------------------
+# -- Usage
+# -----------------------------------------------------------
+die "Usage: perl ./<this_program> <domain> <qtype> <qclass> [<nameserver>]\nex) ./<this_program> www.heise.de A IN\n\n"
+unless (@ARGV gt 2);
+
+# -----------------------------------------------------------
+# -- Input arguments: "<domain>", "<type>" and "class"
+# -----------------------------------------------------------
+my $req_domain = shift;
+my $req_type  = shift;
+my $req_class = shift;
+my $req_nameserver = shift || NAME_SERVER;
+
+# -----------------------------------------------------------
+# -- LABEL: BEGIN_POINT
+# -- 	If the local name server can't answer right information
+# --	get one other name server from additional section
+# --	start from this point again.
+# -----------------------------------------------------------
+BEGIN_POINT:
+
+# -----------------------------------------------------------
+# -- Generating a packet: (Header + Question)
+# -----------------------------------------------------------
+my $header = genHeader(rand(65536), 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0);
+my $question = genQuestion($req_domain, $req_type, $req_class);
+
+# -----------------------------------------------------------
+# -- Opening UDP socket, then send and receive queries.
+# -----------------------------------------------------------
+my $buffer; # Raw data will be stored here
+my $client = IO::Socket::INET->new(PeerAddr=>$req_nameserver, PeerPort=>53, Type=>SOCK_DGRAM, Proto=>"udp");
+binmode($client);
+$client->send($header . $question);
+$client->recv($buffer, 1024, 1); # Assume that packet is not bigger than 1024kb and actually the packet size is limited.
+$client->close();
+
+# -----------------------------------------------------------
+# -- Unpacking packet in byte, every single element of 
+# -- @buffer_octets is one byte big.
+# -----------------------------------------------------------
+my $total_bytes = length($buffer);
+my @buffer_octets = unpack("c" x $total_bytes, $buffer);
+
+# -----------------------------------------------------------
+# -- Packing first 12 bytes again to parse header section.
+# -----------------------------------------------------------
+my @recv_header_octets;
+for (my $i = 0 ; $i < 12 ; $i++)
+{
+	$recv_header_octets[$i] = $buffer_octets[$i];
+}
+
+# -----------------------------------------------------------
+# -- This will parse and print header section.
+# -----------------------------------------------------------
+&printHeader(pack("c12", @recv_header_octets));
+
+# -----------------------------------------------------------
+# -- This will parse and print other sections of the packet.
+# -----------------------------------------------------------
+&printBody();
+
+# -----------------------------------------------------------
+# -- This subroutine generates and packs header information
+# -- and returns it as binary data.
+# -----------------------------------------------------------
+sub genHeader
+{
+	my ($id,$qr,$opcode,$aa,$tc,$rd,$ra,$z,$rcode,$qdcount,$ancount,$nscount,$arcount) = @_;
+	
+	my $sixteen_bits = 0;
+	$sixteen_bits = ($qr eq 1) ? &setBit($sixteen_bits, 15) : &resetBit($sixteen_bits, 15);
+	$sixteen_bits = &setRange($sixteen_bits, $opcode, 11, 4);
+	$sixteen_bits = ($aa eq 1) ? &setBit($sixteen_bits, 10) : &resetBit($sixteen_bits, 10);
+	$sixteen_bits = ($tc eq 1) ? &setBit($sixteen_bits,  9) : &resetBit($sixteen_bits,  9);
+	$sixteen_bits = ($rd eq 1) ? &setBit($sixteen_bits,  8) : &resetBit($sixteen_bits,  8);
+	$sixteen_bits = ($ra eq 1) ? &setBit($sixteen_bits,  7) : &resetBit($sixteen_bits,  7);
+	$sixteen_bits = &setRange($sixteen_bits, $z, 4, 3);
+	$sixteen_bits = &setRange($sixteen_bits, $rcode, 0, 4);
+
+	my $header = pack("n6",$id,$sixteen_bits,$qdcount,$ancount,$nscount,$arcount);
+
+	return $header;
+}
+
+# -----------------------------------------------------------
+# -- So does this for the question section.
+# -----------------------------------------------------------
+sub genQuestion
+{
+	my $name  = shift; # Ex) www.tu-berlin.de
+	my $type  = uc shift; # Ex) A
+	my $class = uc shift; # Ex) IN
+
+	# --------------------------------------------------------
+	# -- A               1 a host address
+	# -- NS              2 an authoritative name server
+	# -- MD              3 a mail destination (Obsolete - use MX)
+	# -- MF              4 a mail forwarder (Obsolete - use MX)
+	# -- CNAME           5 the canonical name for an alias
+	# -- SOA             6 marks the start of a zone of authority
+	# -- MB              7 a mailbox domain name (EXPERIMENTAL)
+	# -- MG              8 a mail group member (EXPERIMENTAL)
+	# -- MR              9 a mail rename domain name (EXPERIMENTAL)
+	# -- NULL            10 a null RR (EXPERIMENTAL)
+	# -- WKS             11 a well known service description
+	# -- PTR             12 a domain name pointer
+	# -- HINFO           13 host information
+	# -- MINFO           14 mailbox or mail list information
+	# -- MX              15 mail exchange
+	# -- TXT             16 text strings
+	# -- AXFR            252 A request for a transfer of an entire zone
+	# -- MAILB           253 A request for mailbox-related records (MB, MG or MR)
+	# -- MAILA           254 A request for mail agent RRs (Obsolete - see MX)
+	# -- *               255 A request for all records
+	# --------------------------------------------------------
+	my $qtype = $qtype_as_number{$type} || 255;
+
+	# --------------------------------------------------------
+	# -- IN   1 the Internet
+	# -- CS   2 the CSNET class (Obsolete - used only for examples in some obsolete RFCs)
+	# -- CH   3 the CHAOS class
+	# -- HS   4 Hesiod [Dyer 87]
+	# -- *    255 any class
+	# --------------------------------------------------------
+	my $qclass = $qclass_as_number{$class} || 255;
+
+	my @name_array = split(/\./, $name); # Ex) www tu-berlin de
+	my @octets;
+
+	my $k = 0;
+	for (my $i = 0 ; $i < @name_array ; $i++)
+	{
+		# ------------------------------------------------
+		# -- First octet is the number of following octets
+		# ------------------------------------------------
+	        $octets[$k] = 0; 	
+		$octets[$k] = length($name_array[$i]); 
+		$k++;
+
+		for (my $j = 0 ; $j < length($name_array[$i]) ; $j++)
+		{
+			$octets[$k] = ord(substr($name_array[$i], $j, 1));
+			$k++;
+		}
+	}
+
+	# --------------------------------------------------------
+	# -- Last octet must be a zero. 
+	# --------------------------------------------------------
+	$octets[$k] = 0;
+	$k++;
+
+	my $packedOut = pack("c" x @octets . "nn", @octets,$qtype,$qclass);
+
+	return $packedOut;
+}
+
+# -----------------------------------------------------------
+# -- This subroutine parses and prints the header information
+# -- of the packet. The input argument is 12 bytes binary
+# -- data.
+# -----------------------------------------------------------
+sub printHeader
+{
+	($recv_id, $recv_sixteen_bits, $recv_qdcount, $recv_ancount, $recv_nscount, $recv_arcount) = unpack("n6",shift);
+
+	my @opcode_str = ("QUERY", "IQUERY", "STATUS");
+	my @rcode_str = ("NOERROR","FORMATERROR","SERVERFAILURE","NAMEERROR","NOTIMPLEMENTED","REFUSED");
+
+	# ------------------------------------------------
+	# -- $qr: 15th bit
+	# -- $opcode: 11th~14th bits
+	# -- $aa: 10th bit
+	# -- $tc: 9th bit
+	# -- $rd: 8th bit
+	# -- $ra: 7th bit
+	# -- $z: 4th~6th bits
+	# -- $rcode: 0~3rd bits
+	#-------------------------------------------------
+	drawText(ANSI_LTBLUE, ANSI_BLACK, "=" x 46 . " Header " . "=" x 46 . "\n\n");
+	drawText(ANSI_LIME, ANSI_BLACK, ">> SERVER: " . $req_nameserver . "\n");
+	print "opcode: $opcode_str[&getRange($recv_sixteen_bits, 11, 4)], ";
+	print "status: $rcode_str[&getRange($recv_sixteen_bits, 0, 3)], ";
+	print "id: $recv_id\n";
+	print "qr: " . &getBit($recv_sixteen_bits,15) . ", ";
+	print "aa: " . &getBit($recv_sixteen_bits,10) . ", ";
+	print "tc: " . &getBit($recv_sixteen_bits, 9) . ", ";
+	print "rd: " . &getBit($recv_sixteen_bits, 8) . ", ";
+	print "ra: " . &getBit($recv_sixteen_bits, 7) . "\n";
+	print "QUERY: $recv_qdcount, ";
+	print "ANSWER: $recv_ancount, ";
+	print "AUTHORITY: $recv_nscount, ";
+	print "ADDITIONAL: $recv_arcount\n";
+	print "\n";
+
+	die "Server sent error message: $rcode_str[&getRange($recv_sixteen_bits, 0, 3)]" 
+	unless (&getRange($recv_sixteen_bits, 0, 3) eq 0); 
+}
+
+# -----------------------------------------------------------
+# -- This subroutine parses and prints another sections.
+# -----------------------------------------------------------
+sub printBody
+{
+	# --------------------------------------------------------
+	# -- We start from 12th octet from @buffer_octets.
+	# -- As we saw above, 0 ~ 11th octets are header information
+	# --------------------------------------------------------
+	my $index = 12; # Index of received bytes
+
+	# --------------------------------------------------------
+	# -- Parsing and printing the question section:
+	# --------------------------------------------------------
+	my @recv_qname;
+	my @recv_qtype;
+	my @recv_qclass;
+	
+	# --------------------------------------------------------
+	# -- We decode here the requested domain name. first octet
+	# -- include the 1 byte number, this number is the number
+	# -- of alphabets follow behind. It ends with numerical 0.
+	# --
+	# -- Example) www.domain.com => 3www6domain3com =>
+	# --
+	# --  3ord(w)ord(w)ord(w)6ord(d)ord(o)ord(m)ord(a)ord(i)
+	# --  ord(n)3ord(c)ord(o)ord(m)0
+	# --------------------------------------------------------
+	for (my $i = 0 ; $i < $recv_qdcount ; $i++)
+	{
+		my $charCount = 0;
+		while ($charCount = $buffer_octets[$index++])
+		{
+			for (my $j = 0 ; $j < $charCount ; $j++)
+			{
+				$recv_qname[$i] .= chr($buffer_octets[$index++]);
+			}
+
+			$recv_qname[$i] .= ".";
+		}
+
+		$recv_qtype[$i] = 0;
+		$recv_qtype[$i] = &setByte($recv_qtype[$i], 1, $buffer_octets[$index++]);
+		$recv_qtype[$i] = &setByte($recv_qtype[$i], 0, $buffer_octets[$index++]);
+
+		$recv_qclass[$i] = 0;
+		$recv_qclass[$i] = &setByte($recv_qclass[$i], 1, $buffer_octets[$index++]);
+		$recv_qclass[$i] = &setByte($recv_qclass[$i], 0, $buffer_octets[$index++]);
+	}
+
+	drawText(ANSI_LTBLUE, ANSI_BLACK, "=" x 41 . " Question Section " . "=" x 41 . "\n\n");
+	for (my $k = 0 ; $k < $recv_qdcount ; $k++)
+	{
+		printf("%-6s", "[#$k] "); 
+		print "QNAME: $recv_qname[$k]\t";
+		print "QTYPE: $qtype_as_string{$recv_qtype[$k]}\t"; 
+		print "QCLASS: $qclass_as_string{$recv_qclass[$k]}\n\n";
+	}
+
+	# --------------------------------------------------------
+	# -- Parsing and printing the answer section:
+	# --------------------------------------------------------
+	drawText(ANSI_LTBLUE, ANSI_BLACK, "=" x 42 . " Answer Section " . "=" x 42 . "\n\n");
+	$index = &parseSection($recv_ancount, $index);
+	print "\n";
+
+        # --------------------------------------------------------
+        # -- Parsing and printing the Authority section:
+        # --------------------------------------------------------
+        drawText(ANSI_LTBLUE, ANSI_BLACK, "=" x 41 . " Authority Section " . "=" x 40 . "\n\n");
+        $index = &parseSection($recv_nscount, $index);
+	print "\n";
+
+	# backup the index for later using.
+	my $index_backup = $index;
+
+        # --------------------------------------------------------
+	# -- Parsing and printing the Additional section:
+	# --------------------------------------------------------
+	drawText(ANSI_LTBLUE, ANSI_BLACK, "=" x 40 . " Additional Section " . "=" x 40 . "\n\n");
+	$index = &parseSection($recv_arcount, $index);
+	print "\n";
+
+	# --------------------------------------------------------
+	# -- In case local name server doesn't find the right information
+	# -- from its own database, get a domain name of the other name
+	# -- server, which possibly has right information, then start
+	# -- from BEGIN_POINT again.
+	# --------------------------------------------------------
+	if ($recv_ancount eq 0)
+	{
+		if ($recv_arcount ne 0)
+		{
+			print "-" x 100 . "\n";
+
+			my $my_dname = &decompressName($index_backup);
+			$my_dname =~ s/\.$//;
+			$req_nameserver = $my_dname;
+			goto BEGIN_POINT;
+		}
+		else
+		{
+			print "\nNot Found\n";
+		}
+	}
+}
+
+# --------------------------------------------------------
+# -- This subroutine parses and prints answer, authority
+# -- and additional section, it is possible to share one
+# -- subroutine because those three sections use same
+# -- format.
+# --
+# -- This subroutine needs the index, which indicates current
+# -- parsing point of @buffer_octets and returns it too.
+# --------------------------------------------------------
+sub parseSection
+{
+	my $record_count = shift; # How many answers, authority or additional entries?
+	my $my_index = shift; 	  # Which point start this section?
+	
+	# ------------------------------------------------------------
+	# -- Information will be parsed and stored in following arrays
+	# ------------------------------------------------------------
+	my @isCompressed; # If first two bits are ones, then "name" is compressed
+	my @recv_name;
+	my @recv_type;
+	my @recv_class;
+	my @recv_ttl;
+	my @recv_rdlength;
+	my @recv_rdata; # Every type has differen format of data.
+
+	for (my $i = 0 ; $i < $record_count ; $i++)
+	{
+		# -----------------------------------------------------------------------
+		# -- Check if 6th and 7th bits are ones. If so, it's compressed.
+		# -----------------------------------------------------------------------
+		$isCompressed[$i] = ((&getBit($buffer_octets[$my_index], 7) eq 1) and (&getBit($buffer_octets[$my_index], 6) eq 1)) ? 1 : 0;
+		if ($isCompressed[$i])
+		{
+			# ---------------------------------------------------------------
+			# -- Exactly two bytes (two octets, 16 bits, size of short)
+			# ---------------------------------------------------------------
+			$recv_name[$i] = &decompressName($my_index);
+			$my_index = $my_index + 2; # two bytes
+		}
+		# -----------------------------------------------------------------------
+		# -- If it's not compressed, parse same way as we did in the question section
+		# -----------------------------------------------------------------------
+		else
+		{
+        	        my $charCount = 0;
+
+	                while ($charCount = $buffer_octets[$my_index++])
+	                {
+	                        for (my $j = 0 ; $j < $charCount ; $j++)
+	                        {
+	                                $recv_name[$i] .= chr($buffer_octets[$my_index++]);
+	                        }
+	
+                	        $recv_name[$i] .= ($buffer_octets[$my_index] ne 0) ? ".":"";
+                	}
+		}
+
+		$recv_type[$i] = 0;
+		$recv_type[$i] = &setByte($recv_type[$i], 1, $buffer_octets[$my_index++]);
+		$recv_type[$i] = &setByte($recv_type[$i], 0, $buffer_octets[$my_index++]);
+
+		$recv_class[$i] = 0;
+		$recv_class[$i] = &setByte($recv_class[$i], 1, $buffer_octets[$my_index++]);
+		$recv_class[$i] = &setByte($recv_class[$i], 0, $buffer_octets[$my_index++]);
+
+		$recv_ttl[$i] = 0;
+		$recv_ttl[$i] = &setByte($recv_ttl[$i], 3, $buffer_octets[$my_index++]);
+		$recv_ttl[$i] = &setByte($recv_ttl[$i], 2, $buffer_octets[$my_index++]);
+		$recv_ttl[$i] = &setByte($recv_ttl[$i], 1, $buffer_octets[$my_index++]);
+		$recv_ttl[$i] = &setByte($recv_ttl[$i], 0, $buffer_octets[$my_index++]);
+
+		$recv_rdlength[$i] = 0;
+		$recv_rdlength[$i] = &setByte($recv_rdlength[$i], 1, $buffer_octets[$my_index++]);
+		$recv_rdlength[$i] = &setByte($recv_rdlength[$i], 0, $buffer_octets[$my_index++]);
+
+		# -----------------------------------------------------------------------
+		# -- Every type (A, NS etc) has differen format of rdata
+		# -----------------------------------------------------------------------
+		$recv_rdata[$i] = "";
+
+		# -----------------------------------------------------------------------
+		# -- TYPE 'A': a 32 bit Internet address (RFC1035 - 3.4.1)
+		# -----------------------------------------------------------------------
+		if ($recv_type[$i] eq 1)
+		{
+			for (my $j = 0 ; $j < $recv_rdlength[$i] ; $j++)
+			{
+				my $tmpOct = $buffer_octets[$my_index++];
+				$recv_rdata[$i] .= ($tmpOct lt 0) ? ((255 + $tmpOct) + 1) : $tmpOct;
+				$recv_rdata[$i] .= ($j lt ($recv_rdlength[$i] - 1)) ? "." : "";
+			}
+		}
+		# -----------------------------------------------------------------------
+		# -- TYPE 'NS': a <domain-name> which specifies a host which should be
+		# -- authoritative for the specified class and domain. (RFC1035 - 3.3.11)
+		# -----------------------------------------------------------------------
+		elsif ($recv_type[$i] eq 2)
+		{
+			$recv_rdata[$i] = &decompressName($my_index);
+			$my_index = $my_index + $recv_rdlength[$i];
+		}
+		# -----------------------------------------------------------------------
+		# -- Otherwise
+		# -----------------------------------------------------------------------
+		else
+		{
+			$recv_rdata[$i] = "Unknown type...";
+			$my_index = $my_index + $recv_rdlength[$i];
+		}
+	}
+	print "-" x 100 . "\n";
+	printf("%-6s%-34s%-8s%-8s%-8s%-16s%-15s\n","Num","Name","Type","Class","TTL","RDLength","RData");
+	print "-" x 100 . "\n\n";
+
+	for (my $k = 0 ; $k < $record_count ; $k++)
+	{
+		printf("%-6s", "[#$k] ");
+		printf("%-30s", $recv_name[$k]);
+		printf("\t%-7s", $qtype_as_string{$recv_type[$k]});
+#		print $recv_type[$k];
+		printf("\t%-7s", $qclass_as_string{$recv_class[$k]});
+		printf("\t%-6d", $recv_ttl[$k]);
+		printf("\t%-8d", $recv_rdlength[$k]);
+		printf("\t%-15s", $recv_rdata[$k]);
+		print "\n";
+	}
+
+	return $my_index;
+}
+
+# --------------------------------------------------------
+# -- This subroutine decompress compressed name. If first
+# -- two bits are ones, the other 14 bits are pointer and
+# -- indicate where the real name starts.
+# --------------------------------------------------------
+sub decompressName
+{
+	my $my_index = shift;
+	my $my_name = "";
+	my $my_count = 0;
+
+	while ($my_count = $buffer_octets[$my_index++])
+	{
+		# -------------------------------------------------------
+		# -- If first two bits are ones, it is compressed.
+		# -------------------------------------------------------
+		if ((&getBit($my_count, 7) eq 1) and (&getBit($my_count, 6) eq 1))
+		{
+			my $tmpShort = 0;
+			$tmpShort = &setByte($tmpShort, 1, $my_count);
+			$tmpShort = &setByte($tmpShort, 0, $buffer_octets[$my_index++]);
+			$tmpShort = &resetBit(&resetBit($tmpShort, 15), 14);
+			$my_name .= &decompressName($tmpShort);
+			last;
+		}
+
+		# ------------------------------------------------------
+		# -- Not compressed part can be decoded normal(?) way.
+		# ------------------------------------------------------
+		for (my $j = 0 ; $j < $my_count ; $j++)
+		{
+			$my_name .= chr($buffer_octets[$my_index++]);
+		}
+
+		$my_name .= ".";
+	}
+
+
+	return $my_name;
+}
+
+print "\n";
