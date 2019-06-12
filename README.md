@@ -14,6 +14,7 @@ $ *sudo docker run --rm darcy95/nslook perl nslook [domain] [qtype] [qclass]*
 ## Running (method 2: obtain the shell and run the script inside of a container)
 
 $ *sudo docker run --rm -it darcy95/nslook /bin/bash*
+
 *root@d919c8a229bd:/usr/src/nslook# perl nslook [domain] [qtype] [qclass]*
 
 ## Example
