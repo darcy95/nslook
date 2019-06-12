@@ -10,6 +10,7 @@
 # -----------------------------------------------------------
 use strict;
 use warnings;
+use lib '.';
 use M_Ansi;
 use M_Bin;
 use IO::Socket::INET;
